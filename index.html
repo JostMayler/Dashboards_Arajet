@@ -1586,11 +1586,13 @@ body{
               <th>Grupo</th>
               <th>Perdidas</th>
               <th>Conectados</th>
+              <th>Conectados con llamadas</th>
               <th>Conectados sin llamada</th>
               <th>En auxiliar</th>
               <th>Desconectados</th>
               <th>Situación</th>
               <th>Agentes conectados</th>
+              <th>Conectados con llamadas</th>
               <th>Agentes en auxiliar</th>
             </tr>
           </thead>
@@ -1604,13 +1606,13 @@ body{
         <div>
           <h2 class="table-title">Lectura operativa</h2>
           <div class="small-note">
-            Una llamada perdida con agentes Online y sin llamada activa merece una revisión prioritaria.
+            Una llamada perdida con agentes Online sin llamada activa merece una revisión prioritaria; los agentes que sí estaban atendiendo otra llamada se muestran en "Conectados con llamadas".
           </div>
         </div>
       </div>
       <div id="perdidasInsight" class="perdidas-insight"></div>
       <div class="perdidas-alerta">
-        <strong>Importante:</strong> el análisis cruza la hora de la llamada perdida con los estados registrados en la pestaña <b>estados</b>. La disponibilidad se calcula como agentes Online / Online Talk que no estaban atendiendo otra llamada en ese instante.
+        <strong>Importante:</strong> el análisis cruza la hora de la llamada perdida con los estados registrados en la pestaña <b>estados</b>. La disponibilidad se calcula como agentes Online / Online Talk que no estaban atendiendo otra llamada en ese instante. Los agentes que tenían una llamada activa se muestran por separado como "Conectados con llamadas".
       </div>
     </div>
 
@@ -1756,8 +1758,16 @@ function parseHoraExcel(v, fechaBase){
     }
 
     // Para una hora Excel real expresada como fracción del día.
+    // IMPORTANTE: se debe aplicar sobre la fecha de base, NO sumar la
+    // fracción a un timestamp que ya contiene la hora de la llamada.
     if(v >= 0 && v < 1){
-      return new Date(base.getTime() + v * 86400000);
+      const d = new Date(base);
+      const totalSeconds = Math.round(v * 86400);
+      const hh = Math.floor(totalSeconds / 3600) % 24;
+      const mm = Math.floor((totalSeconds % 3600) / 60);
+      const ss = totalSeconds % 60;
+      d.setHours(hh, mm, ss, 0);
+      return d;
     }
   }
 
@@ -5071,16 +5081,71 @@ function estadoAgenteEnMomento(intervalos, momento){
 }
 
 function construirIntervalosLlamadasAnalisis(){
+  /*
+     CONSTRUCCIÓN DE LLAMADAS ACTIVAS POR AGENTE.
+
+     Fuente real en la hoja "llamadas":
+       - ID del agente de llamada
+       - Llamada - Marca de tiempo
+       - DURACION DE LLAMADA
+       - HORA INICIO DE LLAMADA / HORA FINAL DE LLAMADA (respaldo)
+
+     Para evitar errores con las horas Excel, primero usamos el timestamp
+     exacto + la duración. Solo si la duración no está disponible usamos
+     las columnas de hora inicio/fin.
+  */
   const porAgente = {};
   const vistos = new Set();
 
   for(const r of datosLlamadas){
-    const id = String(r['ID del agente'] || '').trim();
-    if(!id) continue;
+    const id = String(r['ID del agente de llamada'] || r['ID del agente'] || '').trim();
+    if(!id || id === ' ') continue;
 
-    const ini = fecha(r['Tiempo inicial de conexion']);
-    const fin = fecha(r['Tiempo final de conexion']);
-    if(!ini || !fin || fin <= ini) continue;
+    const marca = fechaLlamadaAnalisis(r);
+    if(!marca) continue;
+
+    const ini = new Date(marca);
+    let fin = null;
+
+    // Método principal: timestamp exacto + duración de llamada.
+    let durSeg = segundosValor(r['DURACION DE LLAMADA']);
+
+    // SheetJS puede entregar una duración de Excel como fracción de día
+    // (ej. 0.0221296 = 00:31:52). En esta columna esa fracción debe
+    // convertirse a segundos; no debe interpretarse como 0.022 segundos.
+    const durRaw = r['DURACION DE LLAMADA'];
+    if(typeof durRaw === 'number' && durRaw > 0 && durRaw < 1){
+      durSeg = durRaw * 86400;
+    }else if(typeof durRaw === 'string' && /^\d*\.?\d+$/.test(durRaw.trim())){
+      const nDur = Number(durRaw.trim());
+      if(nDur > 0 && nDur < 1) durSeg = nDur * 86400;
+    }
+
+    if(Number.isFinite(durSeg) && durSeg > 0){
+      fin = new Date(ini.getTime() + durSeg * 1000);
+    }
+
+    // Respaldo: horas de inicio y final de llamada.
+    if(!fin){
+      const baseFecha = new Date(ini);
+      baseFecha.setHours(0,0,0,0);
+
+      const horaIni = parseHoraExcel(r['HORA INICIO DE LLAMADA'],baseFecha);
+      const horaFin = parseHoraExcel(r['HORA FINAL DE LLAMADA'],baseFecha);
+
+      if(horaIni && horaFin && horaFin > horaIni){
+        // Si existen horas exactas, estas son preferibles para el inicio.
+        ini.setHours(
+          horaIni.getHours(),
+          horaIni.getMinutes(),
+          horaIni.getSeconds(),
+          0
+        );
+        fin = new Date(horaFin);
+      }
+    }
+
+    if(!fin || fin <= ini) continue;
 
     const clave = id + '|' + ini.getTime() + '|' + fin.getTime();
     if(vistos.has(clave)) continue;
@@ -5261,7 +5326,7 @@ function pintarPerdidas(datos){
 
   if(!datos.length){
     tbody.innerHTML =
-      '<tr><td colspan="10" class="text-center text-muted py-4">No se encontraron llamadas perdidas con los filtros seleccionados.</td></tr>';
+      '<tr><td colspan="11" class="text-center text-muted py-4">No se encontraron llamadas perdidas con los filtros seleccionados.</td></tr>';
   }else{
     tbody.innerHTML = datos.map(x => `
       <tr>
@@ -5269,11 +5334,13 @@ function pintarPerdidas(datos){
         <td>${escaparHtml(x.grupo)}</td>
         <td><strong>${Math.round(x.perdidas).toLocaleString('es-CO')}</strong></td>
         <td>${x.conectados}</td>
+        <td><strong>${x.conectadosConLlamada}</strong></td>
         <td><strong>${x.conectadosSinLlamada}</strong></td>
         <td>${x.aux}</td>
         <td>${x.offline}</td>
         <td>${etiquetaSituacion(x)}</td>
         <td>${listaAgentes(x.agentesConectados,'online')}</td>
+        <td>${listaAgentes(x.agentesEnLlamada,'ocupado')}</td>
         <td>${listaAgentes(x.agentesAux,'aux')}</td>
       </tr>
     `).join('');
