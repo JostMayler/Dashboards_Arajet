@@ -1613,7 +1613,15 @@ body{
               <th>Situación</th>
               <th>Agentes conectados</th>
               <th>Conectados con llamadas</th>
-              <th>Agentes en auxiliar</th>
+              <th>Conectados sin llamada</th>
+              <th>Online</th>
+              <th>Away</th>
+              <th>Bathroom</th>
+              <th>Break</th>
+              <th>Lunch</th>
+              <th>Transfers only</th>
+              <th>Offline</th>
+              <th>Otros estados</th>
             </tr>
           </thead>
           <tbody id="tblPerdidas"></tbody>
@@ -5067,7 +5075,8 @@ function construirIntervalosEstadosAnalisis(){
 
     if(fin && fin <= ini) continue;
 
-    const clave = id + '|' + textoNormalizado(estado) + '|' + ini.getTime() + '|' + (fin ? fin.getTime() : 'OPEN');
+    const grupoEstado = String(r['Nombre del grupo'] || '').trim();
+    const clave = id + '|' + grupoNormalizado(grupoEstado) + '|' + textoNormalizado(estado) + '|' + ini.getTime() + '|' + (fin ? fin.getTime() : 'OPEN');
     if(vistos.has(clave)) continue;
     vistos.add(clave);
 
@@ -5084,7 +5093,7 @@ function construirIntervalosEstadosAnalisis(){
       inicio:ini,
       fin:fin || null,
       estado,
-      grupo:String(r['Nombre del grupo'] || '')
+      grupo:grupoEstado
     });
   }
 
@@ -5227,7 +5236,10 @@ function construirIntervalosLlamadasAnalisis(){
   }
 
   for(const id in porAgente){
-    porAgente[id] = unirIntervalos(porAgente[id]);
+    // NO unir intervalos de llamadas aquí: cada llamada conserva su grupo.
+    // Si se unieran, se perdería la asociación grupo -> llamada y el filtro
+    // podría clasificar una llamada de otro grupo como activa.
+    porAgente[id].sort((a,b) => a.inicio - b.inicio);
   }
 
   return porAgente;
@@ -5323,6 +5335,16 @@ function construirPerdidas(){
     const offline = [];
     const conectadosSinLlamada = [];
     const conectadosConLlamada = [];
+    const estadosDetalle = {
+      'Online': [],
+      'Away': [],
+      'Bathroom': [],
+      'Break': [],
+      'Lunch': [],
+      'Transfers only': [],
+      'Offline': [],
+      'Otros': []
+    };
 
     for(const a of estados){
       const estado = estadoAgenteEnMomento(a.intervalos,momento,grupoFiltro);
@@ -5330,17 +5352,41 @@ function construirPerdidas(){
 
       const enLlamada = agenteEstaEnLlamada(llamadas[a.id] || [],momento,grupoFiltro);
 
-      if(esEstadoOnlineAnalisis(estado.estado)){
+      const estadoNorm = textoNormalizado(estado.estado);
+
+      // Si el asesor tiene una llamada activa exactamente en el momento
+      // de la llamada perdida, prevalece la clasificación 'Conectado con llamada'.
+      if(enLlamada){
         online.push(a);
-        if(enLlamada){
-          conectadosConLlamada.push(a);
-        }else{
-          conectadosSinLlamada.push(a);
-        }
-      }else if(esEstadoOfflineAnalisis(estado.estado)){
+        conectadosConLlamada.push(a);
+        continue;
+      }
+
+      if(estadoNorm === 'online' || estadoNorm === 'online - talk' || estadoNorm === 'online talk'){
+        online.push(a);
+        conectadosSinLlamada.push(a);
+        estadosDetalle['Online'].push(a);
+      }else if(estadoNorm === 'away'){
+        aux.push({agente:a,estado:estado.estado});
+        estadosDetalle['Away'].push(a);
+      }else if(estadoNorm === 'bathroom'){
+        aux.push({agente:a,estado:estado.estado});
+        estadosDetalle['Bathroom'].push(a);
+      }else if(estadoNorm === 'break'){
+        aux.push({agente:a,estado:estado.estado});
+        estadosDetalle['Break'].push(a);
+      }else if(estadoNorm === 'lunch'){
+        aux.push({agente:a,estado:estado.estado});
+        estadosDetalle['Lunch'].push(a);
+      }else if(estadoNorm === 'transfers only'){
+        aux.push({agente:a,estado:estado.estado});
+        estadosDetalle['Transfers only'].push(a);
+      }else if(estadoNorm === 'offline' || estadoNorm === 'disconnected'){
         offline.push(a);
+        estadosDetalle['Offline'].push(a);
       }else{
         aux.push({agente:a,estado:estado.estado});
+        estadosDetalle['Otros'].push({agente:a,estado:estado.estado});
       }
     }
 
@@ -5379,7 +5425,8 @@ function construirPerdidas(){
       agentesDisponibles:conectadosSinLlamada.map(a => a.agente),
       agentesEnLlamada:conectadosConLlamada.map(a => a.agente),
       agentesAux:aux.map(x => `${x.agente.agente} (${x.estado})`),
-      agentesOffline:offline.map(a => a.agente)
+      agentesOffline:offline.map(a => a.agente),
+      estadosDetalle: Object.fromEntries(Object.entries(estadosDetalle).map(([k,v]) => [k, v.map(x => typeof x === 'string' ? x : `${x.agente} (${x.estado})`)]))
     });
   }
 
@@ -5411,7 +5458,7 @@ function pintarPerdidas(datos){
 
   if(!datos.length){
     tbody.innerHTML =
-      '<tr><td colspan="11" class="text-center text-muted py-4">No se encontraron llamadas perdidas con los filtros seleccionados.</td></tr>';
+      '<tr><td colspan="21" class="text-center text-muted py-4">No se encontraron llamadas perdidas con los filtros seleccionados.</td></tr>';
   }else{
     tbody.innerHTML = datos.map(x => `
       <tr>
@@ -5426,7 +5473,15 @@ function pintarPerdidas(datos){
         <td>${etiquetaSituacion(x)}</td>
         <td>${listaAgentes(x.agentesConectados,'online')}</td>
         <td>${listaAgentes(x.agentesEnLlamada,'ocupado')}</td>
-        <td>${listaAgentes(x.agentesAux,'aux')}</td>
+        <td>${listaAgentes(x.agentesDisponibles,'online')}</td>
+        <td>${listaAgentes(x.estadosDetalle['Online'],'online')}</td>
+        <td>${listaAgentes(x.estadosDetalle['Away'],'aux')}</td>
+        <td>${listaAgentes(x.estadosDetalle['Bathroom'],'aux')}</td>
+        <td>${listaAgentes(x.estadosDetalle['Break'],'aux')}</td>
+        <td>${listaAgentes(x.estadosDetalle['Lunch'],'aux')}</td>
+        <td>${listaAgentes(x.estadosDetalle['Transfers only'],'aux')}</td>
+        <td>${listaAgentes(x.estadosDetalle['Offline'],'offline')}</td>
+        <td>${listaAgentes(x.estadosDetalle['Otros'],'aux')}</td>
       </tr>
     `).join('');
   }
@@ -5497,7 +5552,15 @@ $('exportarPerdidas').addEventListener('click',() => {
     'Lista agentes disponibles':x.agentesDisponibles.join(' | '),
     'Lista agentes en llamada':x.agentesEnLlamada.join(' | '),
     'Lista agentes en auxiliar':x.agentesAux.join(' | '),
-    'Lista agentes desconectados':x.agentesOffline.join(' | ')
+    'Lista agentes desconectados':x.agentesOffline.join(' | '),
+     'Online':x.estadosDetalle['Online'].join(' | '),
+     'Away':x.estadosDetalle['Away'].join(' | '),
+     'Bathroom':x.estadosDetalle['Bathroom'].join(' | '),
+     'Break':x.estadosDetalle['Break'].join(' | '),
+     'Lunch':x.estadosDetalle['Lunch'].join(' | '),
+     'Transfers only':x.estadosDetalle['Transfers only'].join(' | '),
+     'Offline':x.estadosDetalle['Offline'].join(' | '),
+     'Otros estados':x.estadosDetalle['Otros'].join(' | ')
   }));
 
   const ws = XLSX.utils.json_to_sheet(filas);
