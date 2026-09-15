@@ -859,6 +859,10 @@ body{
               Lunch
             </option>
 
+            <option value="transferencia">
+              Transferencia
+            </option>
+
             <option value="total">
               Total
             </option>
@@ -993,6 +997,21 @@ body{
 
       </div>
 
+      <div class="card kpi orange">
+
+        <div class="kpi-label">
+          Transferencia
+        </div>
+
+        <div
+          class="kpi-value"
+          id="sumTransferencia"
+        >
+          00:00:00
+        </div>
+
+      </div>
+
     </div>
 
 
@@ -1039,6 +1058,7 @@ body{
               <th>Away</th>
               <th>Break</th>
               <th>Lunch</th>
+              <th>Transferencia</th>
               <th>Total estados</th>
 
             </tr>
@@ -2019,9 +2039,9 @@ function recortarIntervalo(
    UNIR INTERVALOS
 ========================================================= */
 
-function unirIntervalos(intervalos){
+function unirIntervalos(intervalos=[]){
 
-  const arr = intervalos
+  const arr = (Array.isArray(intervalos) ? intervalos : [])
     .filter(x =>
       x.inicio &&
       x.fin &&
@@ -2178,7 +2198,7 @@ function tiempoFueraDeLlamadas(
   }
 
 
-  const cruces = llamadas
+  const cruces = (Array.isArray(llamadas) ? llamadas : [])
     .filter(c => {
 
       if(
@@ -2295,6 +2315,28 @@ function tiempoFueraDeLlamadas(
 
 
 /* =========================================================
+   INTERSECCIÓN DE INTERVALOS
+   Devuelve únicamente el tiempo que coincide entre dos conjuntos.
+========================================================= */
+function intersectarIntervalos(a, b){
+  if(!Array.isArray(a) || !Array.isArray(b) || !a.length || !b.length){
+    return [];
+  }
+
+  const salida = [];
+  for(const x of a){
+    if(!x || !x.inicio || !x.fin) continue;
+    for(const y of b){
+      if(!y || !y.inicio || !y.fin) continue;
+      const ini = new Date(Math.max(x.inicio.getTime(), y.inicio.getTime()));
+      const fin = new Date(Math.min(x.fin.getTime(), y.fin.getTime()));
+      if(fin > ini) salida.push({inicio:ini, fin:fin});
+    }
+  }
+  return unirIntervalos(salida);
+}
+
+/* =========================================================
    CONSTRUIR ESTADOS
 ========================================================= */
 
@@ -2325,75 +2367,13 @@ function construir(
     new Set();
 
 
-  for(const r of datosLlamadas){
-
-    const id = String(
-      r['ID del agente'] || ''
-    ).trim();
-
-    if(!id){
-      continue;
-    }
-
-
-    const ini = fecha(
-      r['Tiempo inicial de conexion']
-    );
-
-    if(!ini){
-      continue;
-    }
-
-
-    const fin = fecha(
-      r['Tiempo final de conexion']
-    );
-
-    if(!fin || fin <= ini){
-      continue;
-    }
-
-
-    /* =====================================================
-       CONTROL DE DUPLICADOS DE LLAMADAS
-
-       Agente + Tiempo inicial
-    ===================================================== */
-
-    const claveDuplicado =
-      id + '|' + ini.getTime();
-
-    if(
-      registrosLlamadasProcesados.has(
-        claveDuplicado
-      )
-    ){
-      continue;
-    }
-
-
-    registrosLlamadasProcesados.add(
-      claveDuplicado
-    );
-
-
-    const intervalo =
-      recortarIntervalo(
-        ini,
-        fin,
-        limites
-      );
-
-
-    if(!intervalo){
-      continue;
-    }
-
-
-    (
-      llamadasPorId[id] ||=
-      []
-    ).push(intervalo);
+  // Las llamadas activas se construyen desde la estructura real
+  // de la pestaña "llamadas" (ID del agente de llamada + timestamp + duración).
+  const intervalosLlamadasAnalisis = construirIntervalosLlamadasAnalisis();
+  for(const id in intervalosLlamadasAnalisis){
+    llamadasPorId[id] = intervalosLlamadasAnalisis[id]
+      .map(x => recortarIntervalo(x.inicio, x.fin, limites))
+      .filter(Boolean);
   }
 
 
@@ -2454,11 +2434,16 @@ function construir(
     }
 
 
-    const estado = String(
+    let estado = String(
       r['Estado'] || ''
     )
       .trim()
       .toLowerCase();
+
+    // Normalizar variantes del estado de transferencia.
+    if(['transfer','transferencia','transfered','transferring'].includes(estado)){
+      estado = 'transferencia';
+    }
 
 
     /* =====================================================
@@ -2495,7 +2480,8 @@ function construir(
           talk:[],
           away:[],
           break:[],
-          lunch:[]
+          lunch:[],
+          transferencia:[]
         }
       );
 
@@ -2538,6 +2524,18 @@ function construir(
     if(
       !fin ||
       fin <= ini
+    ){
+      continue;
+    }
+
+    // Para los totales diarios se evita sumar filas que cruzan
+    // medianoche. El archivo fuente presenta estas filas con un
+    // "total" negativo y no las considera dentro del acumulado
+    // del día.
+    if(
+      ini.getFullYear() !== fin.getFullYear() ||
+      ini.getMonth() !== fin.getMonth() ||
+      ini.getDate() !== fin.getDate()
     ){
       continue;
     }
@@ -2620,7 +2618,9 @@ function construir(
 
         break:[],
 
-        lunch:[]
+        lunch:[],
+
+        transferencia:[]
       };
     }
 
@@ -2633,24 +2633,25 @@ function construir(
        PRIMERA CONEXIÓN
     ===================================================== */
 
+    // PRIMERA CONEXIÓN OPERATIVA
+    // Solo se consideran estos estados del archivo Excel:
+    // Transfers only, Online - talk, Online, Away, Bathroom y Break.
+    // Lunch y cualquier otro estado NO definen la primera conexión.
+    const estadosPrimeraConexion = [
+      'transfers only',
+      'online - talk',
+      'online',
+      'away',
+      'bathroom',
+      'break'
+    ];
+
     if(
-
-      (
-        estado === 'online' ||
-        estado === 'online - talk'
-      ) &&
-
+      estadosPrimeraConexion.includes(estado) &&
       dentroDelPeriodo &&
-
-      (
-        !a.primera ||
-        ini < a.primera
-      )
-
+      (!a.primera || ini < a.primera)
     ){
-
-      a.primera =
-        new Date(ini);
+      a.primera = new Date(ini);
     }
 
 
@@ -2715,6 +2716,13 @@ function construir(
       );
     }
 
+    // TRANSFERENCIA
+    // En el Excel el estado válido es exactamente "Transfers only".
+    // El tiempo solo se contabiliza cuando coincide con una llamada activa.
+    if(estado === 'transfers only'){
+      a.transferencia.push(intervalo);
+    }
+
   }
 
 
@@ -2760,15 +2768,11 @@ function construir(
         ]
       );
 
+    // Away se reporta como el tiempo real registrado en el estado Away.
+    // No se descuenta Break/Lunch ni llamadas, porque esos estados
+    // aparecen como registros independientes en el archivo fuente.
     const awayIntervalos =
-      restarIntervalos(
-        a.away,
-        [
-          ...lunchIntervalos,
-          ...breakIntervalos,
-          ...llamadas
-        ]
-      );
+      unirIntervalos(a.away);
 
     const talkIntervalos =
       restarIntervalos(
@@ -2791,6 +2795,17 @@ function construir(
 
     const lunch =
       duracionIntervalos(lunchIntervalos);
+
+    // Transfers only: solo cuenta el tramo en el que el agente
+    // estaba realmente dentro de una llamada.
+    const transferenciaConLlamada =
+      intersectarIntervalos(
+        a.transferencia || [],
+        llamadasPorId[id] || []
+      );
+
+    const transferencia =
+      duracionIntervalos(transferenciaConLlamada);
 
 
     /* =====================================================
@@ -2818,11 +2833,14 @@ function construir(
 
       lunch,
 
+      transferencia,
+
       total:
         talk +
         away +
         brk +
-        lunch
+        lunch +
+        transferencia
 
     });
 
@@ -3102,7 +3120,7 @@ function pintar(datos){
 
     $('tbl').innerHTML =
       '<tr>' +
-      '<td colspan="9" class="text-center text-muted py-4">' +
+      '<td colspan="10" class="text-center text-muted py-4">' +
       'No hay agentes con actividad en los filtros seleccionados.' +
       '</td>' +
       '</tr>';
@@ -3130,6 +3148,8 @@ function pintar(datos){
             <td>${hms(x.break)}</td>
 
             <td>${hms(x.lunch)}</td>
+
+            <td>${hms(x.transferencia)}</td>
 
             <td>${hms(x.total)}</td>
 
@@ -3179,6 +3199,16 @@ function pintar(datos){
       datos.reduce(
         (s,x) =>
           s + x.lunch,
+        0
+      )
+    );
+
+
+  $('sumTransferencia').textContent =
+    hms(
+      datos.reduce(
+        (s,x) =>
+          s + x.transferencia,
         0
       )
     );
@@ -4821,6 +4851,9 @@ $('exportar')
             'Lunch':
               hms(x.lunch),
 
+            'Transferencia':
+              hms(x.transferencia),
+
             'Total estados':
               hms(x.total)
 
@@ -5001,6 +5034,11 @@ function esEstadoOfflineAnalisis(estado){
   return textoNormalizado(estado) === 'offline';
 }
 
+function esEstadoTransferenciaAnalisis(estado){
+  const e = textoNormalizado(estado);
+  return e === 'transferencia' || e === 'transfer';
+}
+
 function construirIntervalosEstadosAnalisis(){
   const porAgente = {};
   const vistos = new Set();
@@ -5013,8 +5051,11 @@ function construirIntervalosEstadosAnalisis(){
     const ini = fecha(r['Tiempo inicial de conexion']);
     if(!ini) continue;
 
-    const estado = String(r['Estado'] || '').trim();
+    let estado = String(r['Estado'] || '').trim();
     if(!estado) continue;
+    if(['transfer','transferencia','transfered','transferring'].includes(textoNormalizado(estado))){
+      estado = 'Transferencia';
+    }
 
     let fin = fecha(r['Tiempo final de conexion']);
     if(!fin){
@@ -5054,30 +5095,56 @@ function construirIntervalosEstadosAnalisis(){
   return Object.values(porAgente);
 }
 
-function estadoAgenteEnMomento(intervalos, momento){
-  let lo = 0;
-  let hi = intervalos.length - 1;
-  let candidato = null;
+function grupoNormalizado(v){
+  return textoNormalizado(String(v || '').trim());
+}
 
-  while(lo <= hi){
-    const mid = Math.floor((lo + hi) / 2);
-    const item = intervalos[mid];
+function estadoAgenteEnMomento(intervalos, momento, grupoFiltro=''){
+  // Puede haber varios registros superpuestos para el mismo agente
+  // (por grupos/skills o duplicados del reporte). Cuando se selecciona
+  // un grupo, SOLO se consideran los estados registrados en ese grupo.
+  if(!Array.isArray(intervalos) || !intervalos.length || !momento) return null;
 
-    if(item.inicio <= momento){
-      candidato = item;
-      lo = mid + 1;
-    }else{
-      hi = mid - 1;
+  const grupoBuscado = grupoNormalizado(grupoFiltro);
+
+  const prioridad = {
+    'transfers only': 100,
+    'online - talk': 90,
+    'online talk': 90,
+    'online': 80,
+    'away': 70,
+    'bathroom': 60,
+    'break': 50,
+    'lunch': 40,
+    'offline': 10,
+    'disconnected': 5,
+    'invisible': 1
+  };
+
+  let mejor = null;
+
+  for(const item of intervalos){
+    if(!item || !item.inicio) continue;
+    if(item.inicio > momento) break;
+    if(item.fin && momento >= item.fin) continue;
+    if(grupoBuscado && grupoNormalizado(item.grupo) !== grupoBuscado) continue;
+
+    if(!mejor){
+      mejor = item;
+      continue;
+    }
+
+    const ti = item.inicio.getTime();
+    const tm = mejor.inicio.getTime();
+    const pi = prioridad[textoNormalizado(item.estado)] || 0;
+    const pm = prioridad[textoNormalizado(mejor.estado)] || 0;
+
+    if(ti > tm || (ti === tm && pi > pm)){
+      mejor = item;
     }
   }
 
-  if(!candidato) return null;
-
-  if(!candidato.fin || momento < candidato.fin){
-    return candidato;
-  }
-
-  return null;
+  return mejor;
 }
 
 function construirIntervalosLlamadasAnalisis(){
@@ -5147,11 +5214,16 @@ function construirIntervalosLlamadasAnalisis(){
 
     if(!fin || fin <= ini) continue;
 
-    const clave = id + '|' + ini.getTime() + '|' + fin.getTime();
+    const grupoLlamada = String(r['Grupo de llamada'] || '').trim();
+    const clave = id + '|' + grupoNormalizado(grupoLlamada) + '|' + ini.getTime() + '|' + fin.getTime();
     if(vistos.has(clave)) continue;
     vistos.add(clave);
 
-    (porAgente[id] ||= []).push({inicio:ini,fin});
+    (porAgente[id] ||= []).push({
+      inicio:ini,
+      fin,
+      grupo:grupoLlamada
+    });
   }
 
   for(const id in porAgente){
@@ -5161,8 +5233,20 @@ function construirIntervalosLlamadasAnalisis(){
   return porAgente;
 }
 
-function agenteEstaEnLlamada(intervalos, momento){
-  if(!intervalos || !intervalos.length) return false;
+function agenteEstaEnLlamada(intervalos, momento, grupoFiltro=''){
+  if(!Array.isArray(intervalos) || !intervalos.length) return false;
+  const grupoBuscado = grupoNormalizado(grupoFiltro);
+
+  // Con filtro de grupo, recorremos los intervalos para no confundir
+  // una llamada activa de otro grupo con la llamada perdida analizada.
+  if(grupoBuscado){
+    return intervalos.some(item =>
+      item && item.inicio &&
+      grupoNormalizado(item.grupo) === grupoBuscado &&
+      momento >= item.inicio &&
+      (!item.fin || momento < item.fin)
+    );
+  }
 
   let lo = 0;
   let hi = intervalos.length - 1;
@@ -5170,10 +5254,11 @@ function agenteEstaEnLlamada(intervalos, momento){
   while(lo <= hi){
     const mid = Math.floor((lo + hi) / 2);
     const item = intervalos[mid];
+    if(!item || !item.inicio){ lo = mid + 1; continue; }
 
     if(momento < item.inicio){
       hi = mid - 1;
-    }else if(momento >= item.fin){
+    }else if(item.fin && momento >= item.fin){
       lo = mid + 1;
     }else{
       return true;
@@ -5240,10 +5325,10 @@ function construirPerdidas(){
     const conectadosConLlamada = [];
 
     for(const a of estados){
-      const estado = estadoAgenteEnMomento(a.intervalos,momento);
+      const estado = estadoAgenteEnMomento(a.intervalos,momento,grupoFiltro);
       if(!estado) continue;
 
-      const enLlamada = agenteEstaEnLlamada(llamadas[a.id] || [],momento);
+      const enLlamada = agenteEstaEnLlamada(llamadas[a.id] || [],momento,grupoFiltro);
 
       if(esEstadoOnlineAnalisis(estado.estado)){
         online.push(a);
